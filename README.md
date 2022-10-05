@@ -1,5 +1,5 @@
 # NSSP_DQ
 
-National Syndromic Surveillance Program-related data quality metrics/analysis. Uses both the Rnssp package and the BioSense server.
+National Syndromic Surveillance Program (NSSP) data quality metrics/analysis. Uses both the Rnssp package and the BioSense server.
 
-The DQ Walkthrough files must be run on the NSSP RStudio Workbench. Feel free to email me with questions: firstname.lastname@uky.edu
+Files #1 - #4 must be run on the NSSP RStudio Workbench. File #5 can be run on any instance of R/RStudio with internet access, as it doesn't use the BioSense server. Feel free to email me with questions: firstname.lastname@uky.edu
