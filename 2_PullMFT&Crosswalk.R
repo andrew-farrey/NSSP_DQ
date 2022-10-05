@@ -37,8 +37,7 @@ query <- paste0("SELECT Facility_Name, C_Facility_ID, C_Biosense_Facility_ID, Fa
 
 MFT <- DBI::dbGetQuery(con, query) %>% 
   distinct() %>% 
-  mutate(Facility_Name = str_trim(Facility_Name, side = "both")) %>% 
-  filter(!Facility_Name == "Baptist Health Richmond, Inc.")
+  mutate(Facility_Name = str_trim(Facility_Name, side = "both"))
 
 # Next, we need to pull the Operational Crosswalk. 
 
