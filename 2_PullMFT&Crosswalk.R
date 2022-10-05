@@ -18,9 +18,6 @@ MFT <- DBI::dbGetQuery(con, paste0("SELECT Facility_Name, C_Facility_ID, C_Biose
 # If you aren't very familiar with SQL, you might find it helpful to filter down to the facilities 
 # you want using the pipe (%>%) operator inline following your initial SQL pull. I separated this example to use the paste0()
 # query method I mentioned in the first script. 
-# 
-# You can remove the filter call to omit Baptist Health Richmond, Inc. and mutate() to remove the whitespaces if your site fixes
-# Facility_Names to reflect accurate names.
 
 query <- paste0("SELECT Facility_Name, C_Facility_ID, C_Biosense_Facility_ID, FacilityID_UUID, Facility_Type, Facility_Type_Code,
                   Facility_Status, Patient_Class_Code, Date_Onboarded, Date_Activated, Date_Last_Modified FROM ",site,"_MFT")
@@ -28,8 +25,7 @@ query <- paste0("SELECT Facility_Name, C_Facility_ID, C_Biosense_Facility_ID, Fa
 MFT <- DBI::dbGetQuery(con, query) %>% 
   filter(Facility_Status == "Active" & Patient_Class_Code == "E") %>% 
   distinct() %>% 
-  mutate(Facility_Name = str_trim(Facility_Name, side = "both")) %>% 
-  filter(!Facility_Name == "Baptist Health Richmond, Inc.")
+  mutate(Facility_Name = str_trim(Facility_Name, side = "both")) 
 
 # Alternatively, you can include most of the necessary filters using SQL syntax within your initial query itself. Either way works,
 # but filtering inside your SQL query will be faster. When filtering patient encounter data, be sure to include "with (nolock)", in any
