@@ -34,7 +34,9 @@ myProfile <- readRDS("myProfile.rds")
 # There are two ways to connect to BioSense that I use (I'm sure there are others).
  
 # The first method uses the odbc library and is the suggested connection method in all NSSP
-# documentation. This method requires you to be online to run the code. It cannot be scheduled to run.
+# documentation. This method requires you to be online to run the code. As far as I know, this connection method cannot be scheduled to run  
+# (though it may be possible after editing the connection parameters. I've not tested this). I use this method when I'm physically using the 
+# NSSP RStudio Workbench to investigate data quality issues and the like.
 
 con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform")
 
