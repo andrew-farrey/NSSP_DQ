@@ -1,0 +1,1717 @@
+---
+title: "State Syndromic Data Quality Report"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+description: "This is a state data quality report. Please knit with parameters."
+output:
+  html_document:
+    toc: true
+params:
+   username:
+    label: "NSSP Username: "
+    value: ""
+    input: text
+    placeholder: "username"
+   password:
+    label: "NSSP Password: "
+    value: ""
+    input: password
+    placeholder: "password"
+   site:
+    label: "Select Site Abbreviation"
+    value: "KY"
+    input: select
+    choices: !r state.abb
+   start_date:
+    label: "Start Date: "
+    value: !r Sys.Date() - 16
+    input: date
+   end_date:
+    label: "End Date: "
+    value: !r as.Date(Sys.Date() - 2)
+    input: date
+   patient_class:
+    label: "Patient Class: "
+    value: "E (Emergency Department)"
+    input: select
+    choices: ["E (Emergency Department)", "I (Inpatient)", "O (Outpatient)"]
+   adt_adjustment:
+    label: "Number of Hours to Adjust Arrived_Date_Time by (your time zone relative to GMT; EST is -4, EDT is -5):"
+    value: 4
+    input: slider
+    min: 3
+    max: 10
+    step: 1
+    sep: ""
+editor_options:
+   chunk_output_type: inline
+---
+
+<style type="text/css">
+  .main-container {
+    max-width: 1300px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+</style>
+
+```{r libraries, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+options(warn = -1)
+options(selfcontained = FALSE)
+if (!require("pacman"))
+  install.packages("pacman")
+pacman::p_load(
+  tidyverse,
+  tidyr,
+  lubridate,
+  tidyquant,
+  DT,
+  data.table,
+  kableExtra,
+  RODBC,
+  scales,
+  janitor,
+  htmltools,
+  plotly,
+  Rnssp,
+  patchwork,
+  tsibble,
+  shadowtext
+)
+
+httr::set_config(httr::config(ssl_verifypeer = 0L))
+```
+
+```{r set dates, echo = FALSE, message = FALSE, warning = FALSE, include = FALSE}
+
+start_date <- as.Date(params$start_date)
+end_date <- as.Date(params$end_date)
+
+start_date_lab = format(start_date, "%B %d, %Y")
+end_date_lab = format(end_date, "%B %d, %Y")
+
+x <- gsub("-", "", start_date)
+y <- gsub("-", "", end_date)
+
+```
+
+```{r format patient_class, echo=FALSE, include=FALSE}
+
+pat.class <-
+  if (params$patient_class == "E (Emergency Department)") {
+    paste0('Emergency Department')
+  } else if (params$patient_class == "I (Inpatient)") {
+    paste0('Inpatient')
+  } else if (params$patient_class == "O (Outpatient)") {
+    paste0('Outpatient')
+  }
+
+patient_class <-
+  if (params$patient_class == "E (Emergency Department)") {
+    paste0('E')
+  } else if (params$patient_class == "I (Inpatient)") {
+    paste0('I')
+  } else if (params$patient_class == "O (Outpatient)") {
+    paste0('O')
+  }
+
+```
+
+```{r load NSSP profile, echo=FALSE, message=FALSE, include=FALSE}
+
+myProfile <- Credentials$new(
+  username = params$username,
+  password = params$password
+)
+
+```
+
+```{r facilitypull, message=FALSE, warning=FALSE, echo=FALSE}
+
+# SQL Connection
+con <-
+  RODBC::odbcConnect(
+    "BioSense_Platform",
+    paste0("BIOSENSE\\", params$username),
+    paste0(params$password)
+  )
+
+# Pull Crosswalk
+operational_crosswalk <-
+  RODBC::sqlQuery(
+    con,
+    paste0(
+      "SELECT C_Biosense_Facility_ID,
+      Facility_Status,
+      Patient_Class_Code
+      FROM ",
+      params$site,
+      "_Operational_Crosswalk"
+    )
+  )
+
+# Pull onboarding facilities from crosswalk
+onboarding <- operational_crosswalk %>%
+  filter(Patient_Class_Code == paste0(patient_class) &
+           Facility_Status == "Onboarding") %>%
+  dplyr::select(-Facility_Status, -Patient_Class_Code) %>%
+  dplyr::distinct()
+
+# Pull active crosswalk facilities
+active_crosswalk <- operational_crosswalk %>%
+  filter(Patient_Class_Code == paste0(patient_class) &
+           Facility_Status == "Active") %>%
+  dplyr::select(C_Biosense_Facility_ID) %>%
+  dplyr::distinct()
+
+# Pull MFT table
+MFT <- RODBC::sqlQuery(
+  con,
+  paste0(
+    "SELECT Facility_Name,
+                                   C_Biosense_Facility_ID,
+                                   Patient_Class_Code,
+                                   Facility_Status
+                                   FROM ",
+    params$site,
+    "_MFT"
+  )
+)
+
+# Filter to Patient Class selected
+MFT <- MFT %>%
+  filter(Patient_Class_Code == paste0(patient_class)) %>%
+  mutate(
+    Facility_Name = str_trim(Facility_Name, side = "both"),
+    Facility_Name = gsub(', Inc.', '', Facility_Name),
+    Facility_Name = gsub(' Inc.', '', Facility_Name),
+    Facility_Name = gsub(' LLC', '', Facility_Name),
+    Facility_Name = gsub(', LLC', '', Facility_Name)
+  ) %>%
+  dplyr::select(Facility_Name, C_Biosense_Facility_ID) %>%
+  dplyr::distinct()
+
+
+# Join facility names to Crosswalk
+active_crosswalk <-
+  dplyr::left_join(active_crosswalk, MFT, by = "C_Biosense_Facility_ID") %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(Facility_Name)
+
+# Join facility names to onboarding facilities
+onboarding <-
+  dplyr::left_join(onboarding, MFT, by = "C_Biosense_Facility_ID") %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(Facility_Name)
+
+# Pull crosswalk C_Biosense_Facility_IDs for Validity
+CBIDs <- active_crosswalk %>%
+  dplyr::select(C_Biosense_Facility_ID) %>%
+  dplyr::distinct() %>%
+  pull()
+
+odbcClose(con)
+```
+
+```{r pull, echo=FALSE, message=FALSE, warning=FALSE}
+#Set up con, SQL pull
+con <-
+  RODBC::odbcConnect(
+    "BioSense_Platform",
+    paste0("BIOSENSE\\", params$username),
+    paste0(params$password)
+  )
+
+ED.messages <-
+  RODBC::sqlQuery(
+    con,
+    paste0(
+      "SELECT Feed_Name, C_Biosense_Facility_ID, C_Facility_ID, C_Biosense_ID, Visit_ID, Processed_ID, Processing_ID, C_Unique_Patient_ID, Message_ID, Treating_Facility_ID, Sending_Facility_ID, Facility_Type_Code, C_FacType_Patient_Class, C_Patient_Class, Patient_Class_Code, C_Patient_Class, Admit_Date_Time, Admit_Reason_Description, C_Chief_Complaint, Chief_Complaint_Text, C_Death, C_Patient_Age, C_Patient_Age_Years, Diagnosis_Code, Diagnosis_Description, Patient_Zip, Trigger_Event, Arrived_Date, Arrived_Date_Time, C_Visit_Date, C_Visit_Date_Time, Message_Date_Time, Recorded_Date_Time, Create_Raw_Date_Time, Sending_Facility_ID_Source, Discharge_Disposition, Discharge_Date_Time, First_Patient_ID, Medical_Record_Number, Admit_Reason_Code, Chief_Complaint_Code, Diagnosis_Type, Administrative_Sex, Age_Reported, Age_Units_Reported, C_Patient_Age_Units, C_Patient_Age_Source, C_Patient_County, Ethnicity_Code, Ethnicity_Description, Patient_City, Patient_State, Patient_Country, Race_Code, Race_Description, Version_ID FROM ",
+      params$site,
+      "_PR_Processed WITH (nolock) WHERE C_Patient_Class='",
+      patient_class,
+      "' and C_Unique_Patient_ID_Source!='First Patient ID' and cast(C_Visit_Date as date) >='",
+      x,
+      "'",
+      " and cast(C_Visit_Date as date) <='",
+      y,
+      "'"
+    )
+  )
+
+odbcClose(con)
+
+# Join Facility Names
+ED.messages <-
+  dplyr::left_join(
+    ED.messages,
+    active_crosswalk,
+    by = c("C_Biosense_Facility_ID" = "C_Biosense_Facility_ID")
+  )
+
+# Data wrangle, make sure dates are formatted, remove non-informative chief complaints, non-informative diagnosis codes, remove invalid facilities (will have a blank facility name if they aren't present in the Operational Crosswalk)
+
+ED.messages <- ED.messages %>%
+  mutate(
+    Facility_Name = str_trim(Facility_Name, side = "both"),
+    Date = as.Date(C_Visit_Date),
+    C_Visit_Date = as.Date(C_Visit_Date),
+    Arrived_Date = as.Date(Arrived_Date),
+    C_Visit_Date_Time = as.POSIXct(C_Visit_Date_Time, format = "%Y-%m-%d %H:%M:%S"),
+    Arrived_Date_Time = as.POSIXct(Arrived_Date_Time, format = "%Y-%m-%d %H:%M:%S"),
+    Message_Date_Time = as.POSIXct(Message_Date_Time, format = "%Y-%m-%d %H:%M:%S"),
+    Recorded_Date_Time = as.POSIXct(Recorded_Date_Time, format = "%Y-%m-%d %H:%M:%S"),
+    C_Chief_Complaint = gsub("[//?,.;'-]+", '', C_Chief_Complaint),
+    C_Chief_Complaint = gsub("//S", '', C_Chief_Complaint),
+    C_Chief_Complaint = gsub(
+      "NA|UNK|NULL|UNK|UNKNOWN|ER|Emergency Room|EMS|null|unk|ed|ed visit|er|na|illness|General|Ambulance|Medic|Chief complaint not present|ed visit|er|Advice Only|Other|xxx|Evaluation|Follow up|medical|General symptom|AMR|EMS//Arrived By|EMS//Ambulance|Triage|Document|Triage peds|Triage-|Triage peds-|See chief complaint quote|See CC quote|Sick|Injury|ill|Eval|squad|Referral|Code 1|Code 3|follow-up",
+      '',
+      C_Chief_Complaint,
+      ignore.case = FALSE
+    ),
+    Diagnosis_Code = gsub(
+      "NA|UNK|NULL|UNK|UNKNOWN|ER|Emergency Room|EMS|null|unk|ed|ed visit|er|na|illness|General|Ambulance|Medic|Chief complaint not present|ed visit|er|Advice Only|Other|xxx|Evaluation|Follow up|medical|General symptom|AMR|EMS//Arrived By|EMS//Ambulance|Triage|Document|Triage peds|Triage-|Triage peds-|See chief complaint quote|See CC quote|Sick|Injury|ill|Eval|squad|Referral|Code 1|Code 3|follow-up",
+      '',
+      Diagnosis_Code,
+      ignore.case = FALSE
+    ),
+    Diagnosis_Code = gsub("//S", '', Diagnosis_Code),
+    Diagnosis_Code = gsub("[//?,.;'-]+", '', Diagnosis_Code)
+  ) %>%
+  mutate(Arrived_Date_Time = Arrived_Date_Time - lubridate::hours(paste0(params$adt_adjustment))) %>%
+  #filter(!C_Biosense_Facility_ID %in% c(15466, 15390, 15391, 15509, 15422, 15513)) %>% # remove the leftmost number sign and add the C_Biosense_Facility IDs you want to omit
+  filter(Facility_Name != "")
+
+# Set blank chief complaints and diagnosis codes to NA
+ED.messages$C_Chief_Complaint[ED.messages$C_Chief_Complaint == ""] <-
+  NA
+ED.messages$Diagnosis_Code[ED.messages$Diagnosis_Code == ""] <- NA
+
+```
+
+```{r limit_facilities, echo=FALSE, message=FALSE, warning=FALSE}
+# If you need to limit to certain facilities in your ESSENCE API calls, do so here. I left my example commented out.
+
+fac <- ""
+
+#fac <- "&geography=24104&geography=15413&geography=15416&geography=15417&geography=15437&geography=15439&geography=15440&geography=15442&geography=15498&geography=15526&geography=15528&geography=15360&geography=15412&geography=15361&geography=15362&geography=15363&geography=15364&geography=15365&geography=15366&geography=23866&geography=23850&geography=15376&geography=15377&geography=23885&geography=23825&geography=15392&geography=15403&geography=23898&geography=17898&geography=15406&geography=15409&geography=15411&geography=15415&geography=19186&geography=15419&geography=19182&geography=15420&geography=15427&geography=15429&geography=19187&geography=15433&geography=23896&geography=15434&geography=15435&geography=19188&geography=28130&geography=23833&geography=15441&geography=15449&geography=15456&geography=15457&geography=15430&geography=15431&geography=15465&geography=15469&geography=15488&geography=15489&geography=15490&geography=15493&geography=19189&geography=15496&geography=15497&geography=15499&geography=15500&geography=15504&geography=15506&geography=15508&geography=19824&geography=15511&geography=15512&geography=15515&geography=15517&geography=15514&geography=15384&geography=23847&geography=15518&geography=15520&geography=15521&geography=15523&geography=15525&geography=15405&geography=15494&geography=33892"
+```
+
+### About
+
+This report is intended to be used to monitor state syndromic surveillance data quality by National Syndromic Surveillance Program (NSSP) participants. If you need to remove/omit specific facilities, you will need to do so manually in the data pull (see the commented out dplyr::filter() statement).
+
+## Introduction
+
+This report pulls and analyzes de-identified syndromic patient encounter data from the `r paste(params$site)`_PR_Processed table in the NSSP BioSense syndromic surveillance platform, restricted to `r paste(pat.class)` patient encounters from active, NSSP-participating facilities occurring on/between **`r start_date_lab`** through **`r end_date_lab`**. The `r paste(params$site)`_PR_Processed table populates the NSSP ER_Base table, which in turn populates NSSP BioSense ESSENCE, the national syndromic surveillance web platform. Please note the patient encounter dates analyzed include a built in "grace period" of 24 hours.[^1]
+
+[^1]: Facility counts, patient counts, and message counts may vary as facilities are independently responsible for their own data quality and how often/quickly patient encounter data is completed, batched, and sent to NSSP.
+
+## Data Quality Elements
+
+-   **Coverage**\
+-   **Timeliness**\
+-   **Completeness**\
+-   **Validity**\
+
+# `r paste(pat.class)` Coverage {.tabset .tabset-fade .tabset-pills}
+
+Click on each tab below to view the associated plot. 
+
+## Active `r paste(params$site)` `r paste(pat.class)` Facilities, by Day
+
+The following graph displays the number of active syndromic `r paste(pat.class)` facilities that have submitted patient encounter data, site-wide from `r start_date_lab` through `r end_date_lab`.
+
+```{r facility_count, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+
+end.Date <- format(end_date, "%d%b%Y")
+start.Date <- format(start_date, "%d%b%Y")
+
+# Troubleshooting tip: depending on your site's onboarding practices, you may need to include '&hospFacilityType=emergency%20care' in your ESSENCE API URLs
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/tableBuilder?endDate=",
+    end.Date,
+    "&geography=",
+    params$site,
+    "&percentParam=noPercent&datasource=va_hosp&startDate=",
+    start.Date,
+    "&medicalGroupingSystem=essencesyndromes&userId=2765&aqtTarget=TableBuilder&geographySystem=hospitalstate&detector=nodetectordetector&timeResolution=daily&hasBeen",
+    patient_class,
+    "=1&rowFields=timeResolution&columnField=hospitalGrouping"
+  )
+
+facility.count <- myProfile$get_api_data(url, fromCSV = FALSE)
+
+facility.count <- facility.count %>%
+  rename(date = timeResolution,
+         hospital = hospitalGrouping,
+         encounters = count) %>%
+  filter(encounters > 0) %>%
+  mutate(
+    date = as.Date(date),
+    hospital = gsub("^.{0,3}", "", hospital),
+    hospital = str_trim(hospital, side = "both")
+  )
+
+facilities <- facility.count %>%
+  group_by(date) %>%
+  summarize(hospitals = n()) %>%
+  ungroup()
+
+ab <- list(
+  title = "Unique Facilities",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = TRUE,
+  rangemode = "tozero"
+)
+
+plotly::plot_ly(
+  facilities,
+  x = ~ date,
+  y = ~ hospitals,
+  type = "scatter",
+  mode = 'lines+markers'
+) %>%
+  plotly::layout(
+    title = "Syndromic Facilities Online by Day",
+    yaxis = ab,
+    xaxis = list(title = 'Date'),
+    showlegend = F
+  )
+```
+
+## Total `r paste(params$site)` `r paste(pat.class)` Patient Encounters by Day
+
+```{r daily_encounters, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+
+daily.encounters <- facility.count %>%
+  group_by(date) %>%
+  summarize(total_encounters = sum(encounters))
+
+ac <- list(
+  title = "Total Patient Encounters",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = TRUE,
+  rangemode = "tozero"
+)
+
+plotly::plot_ly(
+  daily.encounters,
+  x = ~ date,
+  y = ~ total_encounters,
+  type = "scatter",
+  mode = 'lines+markers'
+) %>%
+  plotly::layout(
+    title = "Total Patient Visits by Day",
+    yaxis = ac,
+    xaxis = list(title = 'Date'),
+    showlegend = F
+  )
+```
+
+## Total `r paste(params$site)` `r paste(pat.class)` Patient Messages by Day
+
+```{r messagesperday, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center'}
+
+messages.by.day <- ED.messages %>%
+  group_by(C_Visit_Date) %>%
+  summarize(`Total Messages` = n()) %>%
+  ungroup()
+
+aa <- list(
+  title = "Number of Messages",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = TRUE,
+  range = c(0, 100000)
+)
+
+plotly::plot_ly(
+  messages.by.day,
+  x = ~ C_Visit_Date,
+  y = ~ `Total Messages`,
+  name = 'Total Messages',
+  type = "scatter",
+  mode = 'lines+markers',
+  line = list(color = "green"),
+  marker = list(color = "green")
+) %>%
+  plotly::layout(title = "Total Syndromic Messages by Day",
+                 yaxis = aa,
+                 xaxis = list(title = 'Date')) 
+```
+
+## Onboarding `r paste(params$site)` `r paste(pat.class)` Facilities
+
+```{r onboard, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+onboarding <- onboarding %>%
+  dplyr::select(`Facility Name` = Facility_Name, C_Biosense_Facility_ID) %>%
+  arrange(`Facility Name`)
+
+datatable(
+  onboarding,
+  extensions = 'Buttons',
+  options = list(
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 15,
+    autoWidth = T,
+    scrollY = T,
+    order = list(0, 'asc')
+  ),
+  rownames = FALSE
+) 
+```
+
+# Timeliness {.tabset .tabset-fade .tabset-pills}
+
+A single patient encounter (or "patient visit") usually consists of multiple HL7 messages sent over a period of days, if not weeks, that contain updates to message fields from that patient encounter.
+
+Facilities vary in how quickly they send completed patient encounter information, so NSSP monitors and enforces certain timeliness criteria to encourage facilities to submit timely data. Overall timeliness is calculated from the **earliest**, or **first message** received from each patient encounter, aggregated by facility.
+
+Specifically, timeliness (or "Delay"/"Lag") is calculated by finding the time difference in hours between the physical patient encounter, **C_Visit_Date_Time,**[^2] and the **first/earliest** **Arrived_Date_Time**[^3] received for each unique patient encounter, where Arrived_Date_Time represents the date-time NSSP received the first message from that patient encounter.
+
+[^2]: NSSP-calculated variable that serves as the date/time of encounter. This variable is populated with the earliest date-time referenced in the message, which is usually Admit_Date_Time.
+
+[^3]: NSSP-generated time stamp applied upon message arrival at Biosense Platform
+
+NSSP has stipulated that the first message from every patient encounter should be received within 24 hours (80% site-wide, at a minimum), and classifies messages into one of three timeliness categories:
+
+-   **\<24 Hours** - first encounter message received **less than 24 hours** after patient encounter
+-   **24-48 Hours** - first encounter message received **at least 24, but less than 48 hours** after patient encounter
+-   **\>48 Hours** - first encounter message received **more than 48 hours** after patient encounter
+
+The following graphs include analysis of `r paste(params$site)`'s site-wide syndromic timeliness (`r paste(pat.class)` only), and counts and percentage of visits by NSSP timeliness category (by facility).
+
+C_Visit_Date_Time is submitted in each site’s local time zone, so Arrived_Date_Time must be adjusted, or offset, by the corresponding number of hours to avoid inflating delay by the respective number of hours (Arrived_Date_Time is recorded in UTC/GMT). As an example, the Arrived_Date_Time assigned to HL7 messages sent by a hospital facility located in the Eastern Time zone must be reduced by four hours during daylight savings time (as EDT is UTC/GMT -4), and five hours during standard time (as EST is UTC/GMT -5).
+
+## Overall Timeliness
+
+The following plot displays `r paste(params$site)`'s site-wide percentage for each NSSP timeliness category from `r start_date_lab` through `r end_date_lab`.
+
+```{r site_timeliness_overall, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+# Calculate first message lag - take earliest Arrived_Date_Time per unique encounter, slice to get earliest message, slice again in case of tied messages, cut into NSSP Timeliness Categories
+
+lag <- ED.messages %>%
+  group_by(C_Biosense_ID) %>%
+  slice(which.min(Arrived_Date_Time)) %>%
+  slice(1) %>%
+  mutate(lag = round(as.numeric(
+    difftime(Arrived_Date_Time, C_Visit_Date_Time, units = "hours")
+  )), 2) %>%
+  mutate(TimelinessCategory = cut(
+    lag,
+    breaks = c(-Inf, 24, 48, Inf),
+    labels = c("<24 Hours", "24-48 Hours", ">48 Hours")
+  )) %>%
+  ungroup()
+
+# Create table and proportion table for overall timeliness plot
+lag.table <-
+  as.data.frame(prop.table(table(lag$TimelinessCategory)))
+colnames(lag.table) <- c("Timeliness Category", "Percent")
+
+lag.table <- lag.table %>%
+  mutate(Percent = round(Percent, 2)) %>%
+  mutate(`Timeliness Category` = fct_relevel(`Timeliness Category`, c(">48 Hours", "24-48 Hours", "<24 Hours")))
+
+ggplot(lag.table) +
+  aes(
+    x = lag.table$`Timeliness Category`,
+    fill = `Timeliness Category`,
+    weight = lag.table$`Percent`,
+    text = lag.table$`Percent`
+  ) +
+  geom_bar(color = "black") +
+  coord_flip() +
+  scale_fill_manual("Legend",
+                    values = c(
+                      "<24 Hours" = "#2ca02c",
+                      "24-48 Hours" = "blue",
+                      ">48 Hours" = "red"
+                    )) +
+  labs(
+    x = "NSSP Timeliness Category",
+    y = "Percent",
+    title = paste0(pat.class, " Visits by NSSP Timeliness Category (Percentage)")
+  ) +
+  theme_bw() +
+  geom_text(
+    aes(y = lag.table$`Percent`),
+    label = scales::percent(lag.table$`Percent`),
+    nudge_y = 0.06,
+    size = 5
+  ) +
+  scale_y_discrete(expand = expansion(mult = c(0, 0.12))) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+```
+
+## Facility Visit Counts by NSSP Timeliness Category
+
+These graphs display facility encounter counts for each timeliness category and facility-level percentages for each timeliness category, respectively from `r start_date_lab` through `r end_date_lab`.[^4]
+
+[^4]: Note: the number of `r paste(pat.class)` facilities represented depends upon the number of facilities currently sending patient encounter messages with the corresponding C_Patient_Class, and whether those facilities could be joined to an active facility listed in either the `r paste(params$site)`_MFT (master facility table) or the `r paste(params$site)`_Operational_Crosswalk table.
+
+```{r delay_counts, echo=FALSE,warning=FALSE,message=FALSE, fig.height=16,fig.width=12}
+
+lag.counts <-
+  as.data.frame(table(lag$Facility_Name, lag$TimelinessCategory))
+
+colnames(lag.counts) <-
+  c("Facility Name", "Timeliness Category", "Total")
+
+delay.plot <- data.frame(
+  lag.counts %>%
+    pivot_wider(names_from = `Timeliness Category`,
+                values_from = Total),
+  stringsAsFactors = F
+)
+
+colnames(delay.plot) <-
+  c("Facility Name", "<24 Hours", "24-48 Hours", ">48 Hours")
+
+delay.plot$`Facility Name` <-
+  factor(delay.plot$`Facility Name`,
+         levels = unique(delay.plot$`Facility Name`)[order(delay.plot$`Facility Name`, decreasing = TRUE)])
+
+ad <- list(
+  title = "",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = FALSE
+)
+
+plotly::plot_ly(
+  delay.plot,
+  y = ~ `Facility Name`,
+  x = ~ `<24 Hours`,
+  type = 'bar',
+  name = '<24 Hours',
+  marker = list(color = 'green')
+) %>%
+  plotly::add_trace(
+    x = ~ `24-48 Hours`,
+    name = '24-48 Hours',
+    marker = list(color = "blue")
+  ) %>%
+  plotly::add_trace(
+    x = ~ `>48 Hours`,
+    name = '>48 Hours',
+    marker = list(color = "red")
+  ) %>%
+  plotly::layout(
+    yaxis = ad,
+    xaxis = list(title = 'Counts by Timeliness Category'),
+    barmode = 'stack'
+  )
+```
+
+## Facility Visits, by Percentage of NSSP Timeliness Category
+
+```{r bigplot2, echo=FALSE,warning=FALSE,message=FALSE, fig.height=16,fig.width=12}
+
+lagtable <- table(lag$Facility_Name, lag$TimelinessCategory)
+FacilityLag <- data.frame(prop.table(lagtable, margin = 1))
+
+colnames(FacilityLag) <-
+  c("Facility Name", "Timeliness Category", "Percent")
+
+FacilityLag <- FacilityLag %>%
+  mutate(Percent = round(Percent, 3))
+
+FacLag <- data.frame(
+  FacilityLag %>%
+    pivot_wider(names_from = `Timeliness Category`,
+                values_from = Percent),
+  stringsAsFactors = F
+)
+
+colnames(FacLag) <-
+  c("Facility Name", "<24 Hours", "24-48 Hours", ">48 Hours")
+
+FacLag$`Facility Name` <-
+  factor(FacLag$`Facility Name`, levels = unique(FacLag$`Facility Name`)[order(FacLag$`Facility Name`, decreasing = TRUE)])
+
+plotly::plot_ly(
+  FacLag,
+  y = ~ `Facility Name`,
+  x = ~ `<24 Hours`,
+  type = 'bar',
+  name = '<24 Hours',
+  marker = list(color = 'green')
+) %>%
+  plotly::add_trace(
+    x = ~ `24-48 Hours`,
+    name = '24-48 Hours',
+    marker = list(color = "blue")
+  ) %>%
+  plotly::add_trace(
+    x = ~ `>48 Hours`,
+    name = '>48 Hours',
+    marker = list(color = "red")
+  ) %>%
+  plotly::layout(
+    yaxis = ad,
+    xaxis = list(title = 'Visit Percentage by Timeliness Category'),
+    barmode = 'stack'
+  )
+```
+
+## First Message Timeliness
+
+The following table details mean (average) and median first message lag/delay times for patient encounters on or after `r start_date_lab` through `r end_date_lab` for currently active `r paste(params$site)` `r paste(pat.class)` facilities (with a 24 hour grace period).
+
+
+::: {style="width:80%; height:auto; margin: auto;"}
+```{r meanlag, echo=FALSE, message=FALSE, warning=FALSE}
+
+lagsummary <- lag %>%
+  dplyr::select(Facility_Name, C_Biosense_Facility_ID, lag) %>%
+  group_by(Facility_Name, C_Biosense_Facility_ID) %>%
+  dplyr::summarise(messagelagavg = round(mean(lag, na.rm = TRUE), 2),
+                   messagelagmedian = round(median(lag, na.rm = TRUE), 2)) %>%
+  ungroup()
+
+lagsummary %>% datatable(
+  extensions = 'Buttons',
+  colnames = c(
+    "Facility Name",
+    "C_Biosense_Facility_ID",
+    "Mean 1st Message Lag",
+    "Median 1st Message Lag"
+  ),
+  options = list(
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 15,
+    autoWidth = TRUE,
+    scrollY = T,
+    order = list(3, 'desc')
+  ),
+  rownames = FALSE,
+  caption = htmltools::tags$caption(style = 'caption-side: top; text-align: center; color:black; font-size:125% ;', 'First Message Timeliness')
+) %>%
+  formatStyle('messagelagmedian', color = styleInterval(c(24, 48), c('green', 'blue', 'red'))) %>%
+  formatStyle('messagelagavg', color = styleInterval(c(24, 48), c('green', 'blue', 'red')))
+```
+
+## Chief Complaint (CC) Timeliness
+
+NSSP has stipulated that chief complaint and diagnosis code information should also be received by NSSP within 24 hours of each patient encounter (and not more than 48 hours after). These field-specific delay times are calculated by comparing the C_Visit_Date_Time to the Arrived_Date_Time of the first HL7 message with a non-null chief complaint field per patient encounter.
+
+The following table details the average and median delay from the patient encounter datetime to the Arrived_Date_Time (NSSP arrival time stamp) of the first message per encounter with a non-null **chief complaint** field from `r start_date_lab` through `r end_date_lab`, with a 24 hour grace period. This value is calculated per patient encounter, with reported values representing the aggregate mean and median delay per patient encounter by facility.
+
+```{r CC_time, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate lag for the first message with a non-null chief complaint field by facility
+CClag <- ED.messages %>%
+  dplyr::select(
+    Facility_Name,
+    C_Biosense_ID,
+    C_Biosense_Facility_ID,
+    Arrived_Date_Time,
+    C_Visit_Date_Time,
+    C_Chief_Complaint
+  ) %>%
+  filter(!is.na(C_Chief_Complaint)) %>%
+  group_by(C_Biosense_ID) %>%
+  slice(which.min(Arrived_Date_Time)) %>%
+  slice(1) %>%
+  mutate(lag = as.numeric(
+    difftime(Arrived_Date_Time, C_Visit_Date_Time, units = "hours")
+  )) %>%
+  ungroup() %>%
+  group_by(Facility_Name, C_Biosense_Facility_ID) %>%
+  dplyr::summarise(CClagavg = round(mean(lag, na.rm = TRUE), 2),
+                   CClagmedian = round(median(lag, na.rm = TRUE), 2)) %>%
+  ungroup()
+
+CClag %>%
+  datatable(
+    extensions = 'Buttons',
+    filter = "top",
+    colnames = c(
+      "Facility Name",
+      "C_Biosense_Facility_ID",
+      "Mean Delay to 1st Non-Null CC",
+      "Median Delay to 1st Non-Null CC"
+    ),
+    options = list(
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      pageLength = 15,
+      autoWidth = TRUE,
+      scrollY = T,
+      order = list(3, 'desc')
+    ),
+    rownames = FALSE,
+    caption = htmltools::tags$caption(style = 'caption-side: top; text-align: center; color:black; font-size:125% ;', 'Chief Complaint Timeliness')
+  ) %>%
+  formatStyle('CClagavg', color = styleInterval(c(24, 48), c('green', 'blue', 'red'))) %>%
+  formatStyle('CClagmedian', color = styleInterval(c(24, 48), c('green', 'blue', 'red')))
+```
+
+## Diagnosis Code Timeliness
+
+The following table details the average and median delay from the patient encounter datetime to the Arrived_Date_Time (NSSP arrival time stamp) of the first message per encounter with a non-null **diagnosis code** field  from `r start_date_lab` through `r end_date_lab`, with a 24 hour grace period. This value is calculated per patient encounter, with reported values representing the aggregate mean and median diagnosis code delay per patient encounter by facility.
+
+
+```{r DD_time, echo=FALSE, message=FALSE, warning=FALSE}
+# Calculate lag for first message with a non-null diagnosis code by facility
+DXlag <- ED.messages %>%
+  dplyr::select(
+    Facility_Name,
+    C_Biosense_ID,
+    C_Biosense_Facility_ID,
+    Arrived_Date_Time,
+    C_Visit_Date_Time,
+    Diagnosis_Code
+  ) %>%
+  filter(!is.na(Diagnosis_Code)) %>%
+  group_by(C_Biosense_ID) %>%
+  slice(which.min(Arrived_Date_Time)) %>%
+  slice(1) %>%
+  mutate(lag = as.numeric(
+    difftime(Arrived_Date_Time, C_Visit_Date_Time, units = "hours")
+  )) %>%
+  ungroup() %>%
+  group_by(Facility_Name, C_Biosense_Facility_ID) %>%
+  dplyr::summarise(DXlagavg = round(mean(lag, na.rm = TRUE), 2),
+                   DXlagmedian = round(median(lag, na.rm = TRUE), 2)) %>%
+  ungroup()
+
+DXlag %>%
+  datatable(
+    extensions = 'Buttons',
+    filter = "top",
+    colnames = c(
+      "Facility Name",
+      "C_Biosense_Facility_ID",
+      "Mean Delay to 1st Non-Null DX",
+      "Median Delay to 1st Non-Null DX"
+    ),
+    options = list(
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      pageLength = 15,
+      autoWidth = TRUE,
+      scrollY = T,
+      order = list(3, 'desc')
+    ),
+    rownames = FALSE,
+    caption = htmltools::tags$caption(style = 'caption-side: top; text-align: center; color:black; font-size:125% ;', 'Diagnosis Code Timeliness')
+  ) %>%
+  formatStyle('DXlagavg', color = styleInterval(c(24, 48), c('green', 'blue', 'red'))) %>%
+  formatStyle('DXlagmedian', color = styleInterval(c(24, 48), c('green', 'blue', 'red')))
+```
+
+# Completeness {.tabset .tabset-fade .tabset-pills}
+
+## NSSP Priority 1 and Priority 2 Data Field Completeness
+
+The graphs below display `r paste(params$site)`'s site-wide Priority 1 and Priority 2 data completeness metrics for `r paste(pat.class)` visits as defined by NSSP.
+
+NSSP requires 90% completeness for these Priority 1 and Priority 2 elements across each patient encounter. In other words, at least 90% of patient encounters should have at least one message where each required element is not null to ensure useful and timely syndromic surveillance data.
+
+Completeness is calculated on a per message field basis, as the number of patient encounters with a completed, non-null value for that message field over total patient encounters. 
+
+```{r completeness_metrics, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=12}
+
+# Group by patient encounter, determine whether required message fields have any completed values
+
+element1.summary <- ED.messages %>%
+  dplyr::group_by(C_Biosense_ID) %>%
+  dplyr::mutate(
+    Date = as.Date(C_Visit_Date),
+    FTstatus = case_when(any(!is.na(Facility_Type_Code)) ~ "complete",
+                         all(is.na(Facility_Type_Code)) ~ "null"),
+    SFIDstatus = case_when(any(!is.na(Sending_Facility_ID)) ~ "complete",
+                           all(is.na(Sending_Facility_ID)) ~ "null"),
+    TFIDstatus = case_when(any(!is.na(Treating_Facility_ID)) ~ "complete",
+                           all(is.na(Treating_Facility_ID)) ~ "null"),
+    VIDstatus = case_when(any(!is.na(Visit_ID)) ~ "complete",
+                          all(is.na(Visit_ID)) ~ "null"),
+    CFTstatus = case_when(any(!is.na(C_FacType_Patient_Class)) ~ "complete",
+                          all(is.na(C_FacType_Patient_Class)) ~ "null"),
+    PCCstatus = case_when(any(!is.na(Patient_Class_Code)) ~ "complete",
+                          all(is.na(Patient_Class_Code)) ~ "null"),
+    ADTstatus = case_when(any(!is.na(Admit_Date_Time)) ~ "complete",
+                          all(is.na(Admit_Date_Time)) ~ "null"),
+    ARDstatus = case_when(any(!is.na(Admit_Reason_Description)) ~ "complete",
+                          all(is.na(Admit_Reason_Description)) ~ "null"),
+    CCstatus = case_when(any(!is.na(C_Chief_Complaint)) ~ "complete",
+                         all(is.na(C_Chief_Complaint)) ~ "null"),
+    CCtextstatus = case_when(any(!is.na(Chief_Complaint_Text)) ~ "complete",
+                             all(is.na(Chief_Complaint_Text)) ~ "null"),
+    CPatAgestatus = case_when(any(!is.na(C_Patient_Age)) ~ "complete",
+                              all(is.na(C_Patient_Age)) ~ "null"),
+    CPatAgeYrstatus = case_when(any(!is.na(C_Patient_Age_Years)) ~ "complete",
+                                all(is.na(C_Patient_Age_Years)) ~ "null"),
+    DXstatus = case_when(any(!is.na(Diagnosis_Code)) ~ "complete",
+                         all(is.na(Diagnosis_Code)) ~ "null"),
+    DDescstatus = case_when(any(!is.na(Diagnosis_Description)) ~ "complete",
+                            all(is.na(Diagnosis_Description)) ~ "null"),
+    PatZipstatus = case_when(any(!is.na(Patient_Zip)) ~ "complete",
+                             all(is.na(Patient_Zip)) ~ "null"),
+    ProcIDstatus = case_when(any(!is.na(Processed_ID)) ~ "complete",
+                             all(is.na(Processed_ID)) ~ "null"),
+    TrgEstatus = case_when(any(!is.na(Trigger_Event)) ~ "complete",
+                           all(is.na(Trigger_Event)) ~ "null"),
+    CPatCl = case_when(any(!is.na(C_Patient_Class)) ~ "complete",
+                       all(is.na(C_Patient_Class)) ~ "null"),
+    CPatID = case_when(any(!is.na(C_Unique_Patient_ID)) ~ "complete",
+                       all(is.na(C_Unique_Patient_ID)) ~ "null"),
+    CFacID = case_when(any(!is.na(C_Facility_ID)) ~ "complete",
+                       all(is.na(C_Facility_ID)) ~ "null"),
+    CDth = case_when(any(!is.na(C_Death)) ~ "complete",
+                     all(is.na(C_Death)) ~ "null")
+  ) %>%
+  slice(1) %>%
+  ungroup()
+
+element1.sum <- element1.summary %>%
+  group_by(Feed_Name) %>%
+  summarise(
+    Total = sum(dplyr::n_distinct(C_Biosense_ID)),
+    FT.complete = sum(FTstatus == "complete"),
+    SFID.complete = sum(SFIDstatus == "complete"),
+    TFID.complete = sum(TFIDstatus == "complete"),
+    VID.complete = sum(VIDstatus == "complete"),
+    CFT.complete = sum(CFTstatus == "complete"),
+    PCC.complete = sum(PCCstatus == "complete"),
+    ADT.complete = sum(ADTstatus == "complete"),
+    ARD.complete = sum(ARDstatus == "complete"),
+    CC.complete = sum(CCstatus == "complete"),
+    CCtext.complete = sum(CCtextstatus == "complete"),
+    CPatAge.complete = sum(CPatAgestatus == "complete"),
+    CPatAgeYr.complete = sum(CPatAgeYrstatus == "complete"),
+    DX.complete = sum(DXstatus == "complete"),
+    DDesc.complete = sum(DDescstatus == "complete"),
+    PatZip.complete = sum(PatZipstatus == "complete"),
+    ProcID.complete = sum(ProcIDstatus == "complete"),
+    TrgE.complete = sum(TrgEstatus == "complete"),
+    CPatCl.complete = sum(CPatCl == "complete"),
+    CPatID.complete = sum(CPatID == "complete"),
+    CFacID.complete = sum(CFacID == "complete"),
+    CDth.complete = sum(CDth == "complete"),
+    FT.null = sum(FTstatus == "null"),
+    SFID.null = sum(SFIDstatus == "null"),
+    TFID.null = sum(TFIDstatus == "null"),
+    VID.null = sum(VIDstatus == "null"),
+    CFT.null = sum(CFTstatus == "null"),
+    PCC.null = sum(PCCstatus == "null"),
+    ADT.null = sum(ADTstatus == "null"),
+    ARD.null = sum(ARDstatus == "null"),
+    CC.null = sum(CCstatus == "null"),
+    CCtext.null = sum(CCtextstatus == "null"),
+    CPatAge.null = sum(CPatAgestatus == "null"),
+    CPatAgeYr.null = sum(CPatAgeYrstatus == "null"),
+    DX.null = sum(DXstatus == "null"),
+    DDesc.null = sum(DDescstatus == "null"),
+    PatZip.null = sum(PatZipstatus == "null"),
+    ProcID.null = sum(ProcIDstatus == "null"),
+    TrgE.null = sum(TrgEstatus == "null"),
+    CPatCl.null = sum(CPatCl == "null"),
+    CPatID.null = sum(CPatID == "null"),
+    CFacID.null = sum(CFacID == "null"),
+    CDth.null = sum(CDth == "null"),
+    FT.pct.complete = round(FT.complete / (FT.complete + FT.null) * 100, 2),
+    SFID.pct.complete = round(SFID.complete / (SFID.complete + SFID.null) * 100, 2),
+    TFID.pct.complete = round(TFID.complete / (TFID.complete + TFID.null) * 100, 2),
+    VID.pct.complete = round(VID.complete / (VID.complete + VID.null) * 100, 2),
+    CFT.pct.complete = round(CFT.complete / (CFT.complete + CFT.null) * 100, 2),
+    PCC.pct.complete = round(PCC.complete / (PCC.complete + PCC.null) * 100, 2),
+    ADT.pct.complete = round(ADT.complete / (ADT.complete + ADT.null) * 100, 2),
+    ARD.pct.complete = round(ARD.complete / (ARD.complete + ARD.null) * 100, 2),
+    CC.pct.complete = round(CC.complete / (CC.complete + CC.null) * 100, 2),
+    CCtext.pct.complete = round(CCtext.complete / (CCtext.complete + CCtext.null) * 100, 2),
+    CPatAge.pct.complete = round(CPatAge.complete / (CPatAge.complete + CPatAge.null) * 100, 2),
+    CPatAgeYr.pct.complete = round(CC.complete / (CPatAge.complete + CPatAge.null) * 100, 2),
+    DX.pct.complete = round(DX.complete / (DX.complete + DX.null) * 100, 2),
+    DDesc.pct.complete = round(DDesc.complete / (DDesc.complete + DDesc.null) * 100, 2),
+    PatZip.pct.complete = round(PatZip.complete / (PatZip.complete + PatZip.null) * 100, 2),
+    ProcID.pct.complete = round(ProcID.complete / (ProcID.complete + ProcID.null) * 100, 2),
+    TrgE.pct.complete = round(TrgE.complete / (TrgE.complete + TrgE.null) * 100, 2),
+    CPatCl.pct.complete = round(CPatCl.complete / (CPatCl.complete + CPatCl.null) * 100, 2),
+    CPatID.pct.complete = round(CPatID.complete / (CPatID.complete + CPatID.null) * 100, 2),
+    CFacID.pct.complete = round(CFacID.complete / (CFacID.complete + CFacID.null) * 100, 2),
+    CDth.pct.complete = round(CDth.complete / (CDth.complete + CDth.null) * 100, 2)
+  ) %>%
+  ungroup()
+
+element1.plot <- element1.sum %>%
+  dplyr::select(Feed_Name, contains("pct.complete")) %>%
+  pivot_longer(cols = -Feed_Name) %>%
+  dplyr::rename(Metric = name,
+                Percent_Complete = value) %>%
+  mutate(Percent_Complete = round(Percent_Complete, 2)) %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      "FT.pct.complete" = "Facility_Type_Code",
+      "SFID.pct.complete" = "Sending_Facility_ID",
+      "TFID.pct.complete" = "Treating Facility ID",
+      "VID.pct.complete" = "Visit_ID",
+      "CFT.pct.complete" = "C_FacType_Patient_Class",
+      "PCC.pct.complete" = "Patient_Class_Code",
+      "ADT.pct.complete" = "Admit_Date_Time",
+      "ARD.pct.complete" = "Admit_Reason_Description",
+      "CC.pct.complete" = "C_Chief_Complaint",
+      "CCtext.pct.complete" = "Chief_Complaint_Text",
+      "CPatAge.pct.complete" = "C_Patient_Age",
+      "CPatAgeYr.pct.complete" = "C_Patient_Age_Years",
+      "DX.pct.complete" = "Diagnosis Code",
+      "DDesc.pct.complete" = "Diagnosis_Description",
+      "PatZip.pct.complete" = "Patient_Zip",
+      "ProcID.pct.complete" = "Processing_ID",
+      "TrgE.pct.complete" = "Trigger Event",
+      "CPatCl.pct.complete" = "C_Patient_Class",
+      "CPatID.pct.complete" = "C_Unique_Patient_ID",
+      "CFacID.pct.complete" = "C_Facility_ID",
+      "CDth.pct.complete" = "C_Death"
+    )
+  )
+
+element2.summary <- ED.messages %>%
+  dplyr::group_by(C_Biosense_ID) %>%
+  dplyr::mutate(
+    SendFacIDstatus = case_when(any(!is.na(Sending_Facility_ID_Source)) ~ "complete",
+                                all(is.na(Sending_Facility_ID_Source)) ~ "null"),
+    DDstatus = case_when(any(!is.na(Discharge_Disposition)) ~ "complete",
+                         all(is.na(Discharge_Disposition)) ~ "null"),
+    DischDTstatus = case_when(any(!is.na(Discharge_Date_Time)) ~ "complete",
+                              all(is.na(Discharge_Date_Time)) ~ "null"),
+    FstPtIDstatus = case_when(any(!is.na(First_Patient_ID)) ~ "complete",
+                              all(is.na(First_Patient_ID)) ~ "null"),
+    MRNstatus = case_when(any(!is.na(Medical_Record_Number)) ~ "complete",
+                          all(is.na(Medical_Record_Number)) ~ "null"),
+    RDTstatus  = case_when(any(!is.na(Recorded_Date_Time)) ~ "complete",
+                           all(is.na(Recorded_Date_Time)) ~ "null"),
+    ARCstatus = case_when(any(!is.na(Admit_Reason_Code)) ~ "complete",
+                          all(is.na(Admit_Reason_Code)) ~ "null"),
+    CCcodestatus = case_when(any(!is.na(Chief_Complaint_Code)) ~ "complete",
+                             all(is.na(Chief_Complaint_Code)) ~ "null"),
+    DTstatus = case_when(any(!is.na(Diagnosis_Type)) ~ "complete",
+                         all(is.na(Diagnosis_Type)) ~ "null"),
+    AdmSexstatus = case_when(any(!is.na(Administrative_Sex)) ~ "complete",
+                             all(is.na(Administrative_Sex)) ~ "null"),
+    AgeRepstatus = case_when(any(!is.na(Age_Reported)) ~ "complete",
+                             all(is.na(Age_Reported)) ~ "null"),
+    AgeUnRepstatus = case_when(any(!is.na(Age_Units_Reported)) ~ "complete",
+                               all(is.na(Age_Units_Reported)) ~ "null"),
+    CPatAgeUnstatus = case_when(any(!is.na(C_Patient_Age_Units)) ~ "complete",
+                                all(is.na(C_Patient_Age_Units)) ~ "null"),
+    CPatCounstatus = case_when(any(!is.na(C_Patient_County)) ~ "complete",
+                               all(is.na(C_Patient_County)) ~ "null"),
+    EthCdstatus = case_when(any(!is.na(Ethnicity_Code)) ~ "complete",
+                            all(is.na(Ethnicity_Code)) ~ "null"),
+    EthDescstatus = case_when(any(!is.na(Ethnicity_Description)) ~ "complete",
+                              all(is.na(Ethnicity_Description)) ~ "null"),
+    PatCitstatus = case_when(any(!is.na(Patient_City)) ~ "complete",
+                             all(is.na(Patient_City)) ~ "null"),
+    PatCtrystatus = case_when(any(!is.na(Patient_Country)) ~ "complete",
+                              all(is.na(Patient_Country)) ~ "null"),
+    PatStstatus = case_when(any(!is.na(Patient_State)) ~ "complete",
+                            all(is.na(Patient_State)) ~ "null"),
+    RaceCdstatus = case_when(any(!is.na(Race_Code)) ~ "complete",
+                             all(is.na(Race_Code)) ~ "null"),
+    RaceDescstatus = case_when(any(!is.na(Race_Description)) ~ "complete",
+                               all(is.na(Race_Description)) ~ "null"),
+    VersIDstatus = case_when(any(!is.na(Version_ID)) ~ "complete",
+                             all(is.na(Version_ID)) ~ "null")
+  ) %>%
+  slice(1) %>%
+  ungroup()
+
+element2.sum <- element2.summary %>%
+  group_by(Feed_Name) %>%
+  summarise(
+    SendFacID.complete = sum(SendFacIDstatus == "complete"),
+    DD.complete = sum(DDstatus == "complete"),
+    DischDT.complete = sum(DischDTstatus == "complete"),
+    FstPtID.complete = sum(FstPtIDstatus == "complete"),
+    MRN.complete = sum(MRNstatus == "complete"),
+    RDT.complete = sum(RDTstatus == "complete"),
+    ARC.complete = sum(ARCstatus == "complete"),
+    CCcode.complete = sum(CCcodestatus == "complete"),
+    DT.complete = sum(DTstatus == "complete"),
+    AdmSex.complete = sum(AdmSexstatus == "complete"),
+    AgeRep.complete = sum(AgeRepstatus == "complete"),
+    AgeUnRep.complete = sum(AgeUnRepstatus == "complete"),
+    CPatAgeUn.complete = sum(CPatAgeUnstatus == "complete"),
+    CPatCoun.complete = sum(CPatCounstatus == "complete"),
+    EthCd.complete = sum(EthCdstatus == "complete"),
+    EthDesc.complete = sum(EthDescstatus == "complete"),
+    PatCit.complete = sum(PatCitstatus == "complete"),
+    PatCtry.complete = sum(PatCtrystatus == "complete"),
+    PatSt.complete = sum(PatStstatus == "complete"),
+    RaceCd.complete = sum(RaceCdstatus == "complete"),
+    RaceDesc.complete = sum(RaceDescstatus == "complete"),
+    VersID.complete = sum(VersIDstatus == "complete"),
+    SendFacID.null = sum(SendFacIDstatus == "null"),
+    DD.null = sum(DDstatus == "null"),
+    DischDT.null = sum(DischDTstatus == "null"),
+    FstPtID.null = sum(FstPtIDstatus == "null"),
+    MRN.null = sum(MRNstatus == "null"),
+    RDT.null = sum(RDTstatus == "null"),
+    ARC.null = sum(ARCstatus == "null"),
+    CCcode.null = sum(CCcodestatus == "null"),
+    DT.null = sum(DTstatus == "null"),
+    AdmSex.null = sum(AdmSexstatus == "null"),
+    AgeRep.null = sum(AgeRepstatus == "null"),
+    AgeUnRep.null = sum(AgeUnRepstatus == "null"),
+    CPatAgeUn.null = sum(CPatAgeUnstatus == "null"),
+    CPatCoun.null = sum(CPatCounstatus == "null"),
+    EthCd.null = sum(EthCdstatus == "null"),
+    EthDesc.null = sum(EthDescstatus == "null"),
+    PatCit.null = sum(PatCitstatus == "null"),
+    PatCtry.null = sum(PatCtrystatus == "null"),
+    PatSt.null = sum(PatStstatus == "null"),
+    RaceCd.null = sum(RaceCdstatus == "null"),
+    RaceDesc.null = sum(RaceDescstatus == "null"),
+    VersID.null = sum(VersIDstatus == "null"),
+    SendFacID.pct.complete = round(
+      SendFacID.complete / (SendFacID.complete + SendFacID.null) * 100,
+      2
+    ),
+    DD.pct.complete = round(DD.complete / (DD.complete + DD.null) * 100, 2),
+    DischDT.pct.complete = round(DischDT.complete / (DischDT.complete + DischDT.null) * 100, 2),
+    FstPtID.pct.complete = round(FstPtID.complete / (FstPtID.complete + FstPtID.null) * 100, 2),
+    MRN.pct.complete = round(MRN.complete / (MRN.complete + MRN.null) * 100, 2),
+    RDT.pct.complete = round(RDT.complete / (RDT.complete + RDT.null) * 100, 2),
+    ARC.pct.complete = round(ARC.complete / (ARC.complete + ARC.null) * 100, 2),
+    CCcode.pct.complete = round(CCcode.complete / (CCcode.complete + CCcode.null) * 100, 2),
+    DT.pct.complete = round(DT.complete / (DT.complete + DT.null) * 100, 2),
+    AdmSex.pct.complete = round(AdmSex.complete / (AdmSex.complete + AdmSex.null) * 100, 2),
+    AgeRep.pct.complete = round(AgeRep.complete / (AgeRep.complete + AgeRep.null) * 100, 2),
+    AgeUnRep.pct.complete = round(AgeUnRep.complete / (AgeUnRep.complete + AgeUnRep.null) * 100, 2),
+    CPatAgeUn.pct.complete = round(
+      CPatAgeUn.complete / (CPatAgeUn.complete + CPatAgeUn.null) * 100,
+      2
+    ),
+    CPatCoun.pct.complete = round(CPatCoun.complete / (CPatCoun.complete + CPatCoun.null) * 100, 2),
+    EthCd.pct.complete = round(EthCd.complete / (EthCd.complete + EthCd.null) * 100, 2),
+    EthDesc.pct.complete = round(EthDesc.complete / (EthDesc.complete + EthDesc.null) * 100, 2),
+    PatCit.pct.complete = round(PatCit.complete / (PatCit.complete + PatCit.null) * 100, 2),
+    PatCtry.pct.complete = round(PatCtry.complete / (PatCtry.complete + PatCtry.null) * 100, 2),
+    PatSt.pct.complete = round(PatSt.complete / (PatSt.complete + PatSt.null) * 100, 2),
+    RaceCd.pct.complete = round(RaceCd.complete / (RaceCd.complete + RaceCd.null) * 100, 2),
+    RaceDesc.pct.complete = round(RaceDesc.complete / (RaceDesc.complete + RaceDesc.null) * 100, 2),
+    VersID.pct.complete = round(VersID.complete / (VersID.complete + VersID.null) * 100, 2)
+  ) %>%
+  ungroup()
+
+element2.plot <- element2.sum %>%
+  dplyr::select(Feed_Name, contains("pct.complete")) %>%
+  pivot_longer(cols = -Feed_Name) %>%
+  dplyr::rename(Metric = name,
+                Percent_Complete = value) %>%
+  mutate(Percent_Complete = round(Percent_Complete, 2)) %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      "SendFacID.pct.complete" = "Sending_Facility_ID_Source",
+      "DD.pct.complete" = "Discharge_Disposition",
+      "DischDT.pct.complete" = "Discharge_Date_Time",
+      "FstPtID.pct.complete" = "First_Patient_ID",
+      "MRN.pct.complete" = "Medical_Record_Number",
+      "RDT.pct.complete" = "Recorded_Date_Time",
+      "ARC.pct.complete" = "Admit_Reason_Code",
+      "CCcode.pct.complete" = "Chief_Complaint_Code",
+      "DT.pct.complete" = "Diagnosis_Type",
+      "AdmSex.pct.complete" = "Administrative_Sex",
+      "AgeRep.pct.complete" = "Age_Reported",
+      "AgeUnRep.pct.complete" = "Age_Units_Reported",
+      "CPatAgeUn.pct.complete" = "C_Patient_Age_Units",
+      "CPatCoun.pct.complete" = "C_Patient_County",
+      "PatCtry.pct.complete" = "Patient_Country",
+      "EthCd.pct.complete" = "Ethnicity_Code",
+      "EthDesc.pct.complete" = "Ethnicity_Description",
+      "PatCit.pct.complete" = "Patient_City",
+      "PatSt.pct.complete" = "Patient_State",
+      "RaceCd.pct.complete" = "Race_Code",
+      "RaceDesc.pct.complete" = "Race_Description",
+      "VersID.pct.complete" = "Version_ID"
+    )
+  )
+
+ggplot(element1.plot,
+       aes(x = Metric, y = Percent_Complete, fill = Percent_Complete)) +
+  geom_bar(position = "dodge",
+           stat = "identity",
+           color = "black") +
+  geom_shadowtext(
+    aes(label = scales::percent((
+      Percent_Complete / 100
+    ), accuracy = 1L)),
+    nudge_y = -5,
+    size = 3,
+    color = "white",
+    fontface = "bold"
+  ) +
+  labs(
+    x = "Message Field",
+    y = "Percent Complete",
+    title = paste(
+      params$site,
+      " - NSSP Priority 1 Data Elements Percent Completeness\n(",
+      pat.class,
+      "Only)"
+    )
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  scale_fill_binned("Percent Completeness") +
+  coord_flip() +
+  theme_minimal() +
+  facet_wrap(~ Feed_Name) +
+  theme(
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    strip.text.x = element_text(size = 12, face = "bold")
+  )
+
+ggplot(element2.plot,
+       aes(x = Metric, y = Percent_Complete, fill = Percent_Complete)) +
+  geom_bar(position = "dodge",
+           stat = "identity",
+           color = "black") +
+  geom_shadowtext(
+    aes(label = scales::percent((
+      Percent_Complete / 100
+    ), accuracy = 1L)),
+    nudge_y = -5,
+    size = 3,
+    color = "white",
+    fontface = "bold"
+  ) +
+  labs(
+    x = "Message Field",
+    y = "Percent Complete",
+    title = paste(
+      params$site,
+      " - NSSP Priority 1 Data Elements Percent Completeness\n(",
+      pat.class,
+      "Only)"
+    )
+  ) +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  scale_fill_binned("Percent Completeness") +
+  coord_flip() +
+  theme_minimal() +
+  facet_wrap(~ Feed_Name) +
+  theme(
+    plot.title = element_text(size = 14, hjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    strip.text.x = element_text(size = 12, face = "bold"
+    )
+  )
+```
+
+## ESSENCE API-Derived Chief Complaint and Diagnosis Code Completeness
+
+The plots below display `r paste(params$site)`’s overall chief complaint completeness and diagnosis code completeness calculated from applicable ESSENCE patient encounters. These values have been pulled using the CCAvailable and DDAvailable fields in the ESSENCE API.[^5]
+
+[^5]: [ESSENCE Data Quality Filters](https://www.cdc.gov/nssp/dqc/articles/essence-data-quality-filter.html)
+
+The CCAvailable field measures completeness of the ‘chiefcomplaintparsed’ (the CC of the CCDD) element at the ESSENCE patient encounter level (the presence of any value).
+
+The DDAvailable field measures completeness of the ‘discharge_diagnosis’ (the DD of the CCDD) at the ESSENCE patient encounter level (the presence of any value). The ‘discharge_diagnosis’ field (should) contain ICD-10-CM diagnosis code value(s), populated from the Diagnosis_Code field in the `r paste(params$site)`_PR_Processed table.
+
+```{r ccddavailable, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=10}
+startDate <- format(start_date, "%d%b%Y")
+endDate <- format(end_date, "%d%b%Y")
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/timeSeries?endDate=",
+    endDate,
+    fac,
+    "&percentParam=ccAvailable&datasource=va_hosp&startDate=",
+    startDate,
+    "&medicalGroupingSystem=essencesyndromes&userId=2765&aqtTarget=TimeSeries&geographySystem=hospital&detector=probrepswitch&ccAvailable=1&timeResolution=daily&hasBeen",
+    patient_class,
+    "=1"
+  )
+
+cc.available <- myProfile$get_api_data(url, fromCSV = FALSE) %>%
+  pluck("timeSeriesData") %>%
+  mutate(date = as.Date(date))
+
+completeness.date <-
+  paste(format(min(cc.available$date), "%B %d, %Y,"), "to", format(max(cc.available$date), "%B %d, %Y"))
+
+plot.ccavailable <- ggplot(cc.available) +
+  geom_line(aes(date, count, color = "CCAvailable = 1")) +
+  geom_point(aes(date, count, color = "CCAvailable = 1"), size = 1.25) +
+  labs(x = "Date",
+       y = "Percent of Patient Encounters",
+       title = "Chief Complaint Available") +
+  scale_x_date(date_labels = "%b %d", expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    labels = scales::label_percent(accuracy = 1,
+                                   scale = 1)
+  ) +
+  scale_color_manual(values = c("CCAvailable = 1" = "Blue")) +
+  expand_limits(y = 0) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/timeSeries?endDate=",
+    endDate,
+    fac,
+    "&percentParam=ddAvailable&datasource=va_hosp&startDate=",
+    startDate,
+    "&medicalGroupingSystem=essencesyndromes&userId=2765&aqtTarget=TimeSeries&geographySystem=hospital&detector=probrepswitch&ddAvailable=1&timeResolution=daily&hasBeen",
+    patient_class,
+    "=1"
+  )
+
+dd.available <- myProfile$get_api_data(url, fromCSV = FALSE) %>%
+  pluck("timeSeriesData") %>%
+  mutate(date = as.Date(date))
+
+completeness.date <-
+  paste(format(min(dd.available$date), "%B %d, %Y,"), "to", format(max(dd.available$date), "%B %d, %Y"))
+
+plot.ddavailable <- ggplot(dd.available) +
+  geom_line(aes(date, count, color = "DDAvailable = 1")) +
+  labs(x = "Date",
+       y = "Percent of Patient Encounters",
+       title = "Discharge Diagnosis (Code) Available") +
+  geom_point(aes(date, count, color = "DDAvailable = 1"), size = 1.25) +
+  scale_x_date(date_labels = "%b %d",
+               expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    labels = scales::label_percent(accuracy = 1,
+                                   scale = 1)
+  ) +
+  scale_color_manual(values = c("DDAvailable = 1" = "Blue")) +
+  expand_limits(y = 0) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+plot.ccavailable + plot.ddavailable +
+  plot_annotation(
+    title = paste0(
+      "ESSENCE API-Derived Chief Complaint and Diagnosis Code Completeness (",
+      pat.class,
+      " Only)"
+    ),
+    subtitle = paste0(completeness.date),
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(face = "bold", size = 12, hjust = 0.5)
+    )
+  )
+```
+
+## Chief Complaint and Diagnosis Code Completeness by Facility Table, Since `r start_date_lab`
+
+The following table details the percent completeness of chief complaint (CC) fields, diagnosis code (DX) fields, and counts of encounters with missing chief complaint and diagnosis code fields, by `r paste(params$site)` facility sorted by lowest DX code percent completeness to highest obtained from the `r paste(params$site)`_PR_Processed table. The table also includes the total number of patient visits. Chief Complaint and Diagnosis_Code completeness are measured across the entire patient encounter, not the individual HL7 message.
+
+The font color of the CC percent completeness and DX percent completeness columns indicate how well that facility is doing in terms of uploading usable, non-null chief complaint and diagnosis code information within the NSSP-required time frame.
+
+Green indicates greater than or equal to 90% completeness (NSSP’s percent completeness requirement for required patient encounter fields), orange indicates percent completeness between 60%-90%, and red indicates percent completeness below 60% for that facility and metric.
+
+The table covers metrics of all `r paste(pat.class)` patients with a visit date on or after `r start_date_lab` with a 24 hour grace period.
+
+```{r ccddcompleteness table, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center'}
+# Calculate Completeness across Visits in Date Range
+ccdx.summary <- ED.messages %>%
+  dplyr::group_by(C_Biosense_ID) %>%
+  mutate(
+    Date = as.Date(C_Visit_Date),
+    CCstatus = case_when(any(!is.na(C_Chief_Complaint)) ~ "complete",
+                         all(is.na(C_Chief_Complaint)) ~ "null"),
+    DXstatus = case_when(any(!is.na(Diagnosis_Code)) ~ "complete",
+                         all(is.na(Diagnosis_Code)) ~ "null")
+  ) %>%
+  slice(1) %>%
+  ungroup()
+
+ccdx.summary.table <- ccdx.summary %>%
+  group_by(Facility_Name) %>%
+  summarise(
+    Total = sum(dplyr::n_distinct(C_Biosense_ID)),
+    CC.complete = sum(CCstatus == "complete"),
+    DX.complete = sum(DXstatus == "complete"),
+    CC.null = sum(CCstatus == "null"),
+    DX.null = sum(DXstatus == "null"),
+    CC.pct.complete = round(CC.complete / (CC.complete + CC.null) * 100, 2),
+    DX.pct.complete = round(DX.complete / (DX.complete + DX.null) * 100, 2)
+  ) %>%
+  ungroup()
+
+ccdx.summary.table <- ccdx.summary.table %>%
+  dplyr::select(
+    Facility_Name,
+    CC.complete,
+    CC.null,
+    CC.pct.complete,
+    DX.complete,
+    DX.null,
+    DX.pct.complete,
+    Total
+  )
+
+ccdx.summary.table %>%
+  datatable(
+    extensions = 'Buttons',
+    filter = "top",
+    colnames = c(
+      "Facility Name",
+      "CC Complete",
+      "CC Missing",
+      "CC Percent Complete",
+      "DX Complete",
+      "DX Missing",
+      "DX Percent Complete",
+      "Total Patient Encounters"
+    ),
+    options = list(
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      pageLength = 15,
+      autoWidth = TRUE,
+      scrollY = T,
+      scrollX = T,
+      order = list(6, 'asc')
+    ),
+    rownames = FALSE
+  ) %>%
+  formatStyle('CC.pct.complete', color = styleInterval(c(60, 90), c('red', '#f26a44', 'green'))) %>%
+  formatStyle('DX.pct.complete', color = styleInterval(c(60, 90), c('red', '#f26a44', 'green'))) %>%
+  formatStyle(c('Facility_Name', 'Total'), color = 'black')
+```
+
+# Validity (Overall Performance) {.tabset .tabset-fade .tabset-pills}
+
+## ESSENCE API-Derived Chief Complaint and Diagnosis Code Validity (Overall)
+
+The plots below display `r paste(params$site)`’s overall chief complaint completeness and diagnosis code validity calculated from applicable ESSENCE `r paste(pat.class)` patient encounters. These values have been pulled using the CCInformative and DDInformative fields in the ESSENCE API.[^5]
+
+- The CCInformative field measures whether a given patient encounter has an informative ‘chiefcomplaintparsed’ (the CC of the CCDD) element at the ESSENCE patient encounter level after non-informative chief complaint (NICC) terms have been removed. See the “ESSENCE Data Quality Filter” page for the list of NICC term.
+
+- The DDInformative field measures whether a given patient encounter has an informative ‘discharge_diagnosis’ (the DD of the CCDD, populated by the Diagnosis_Code field from the `r paste(params$site)`_PR_Processed table) element at the ESSENCE patient encounter level after non-informative chief complaint (NICC) terms, the phrase “null,” and blank spaces have been removed.
+
+A full list of NICC terms can be found in the NSSP Data Dictionary, or at [ESSENCE Data Quality Filters](https://www.cdc.gov/nssp/dqc/articles/essence-data-quality-filter.html).
+
+```{r ccddinformative, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.width=10}
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/timeSeries?endDate=",
+    endDate,
+    fac,
+    "&percentParam=ccInformative&datasource=va_hosp&startDate=",
+    startDate,
+    "&medicalGroupingSystem=essencesyndromes&userId=2765&aqtTarget=TimeSeries&geographySystem=hospital&detector=probrepswitch&ccInformative=1&timeResolution=daily&hasBeen",
+    patient_class,
+    "=1"
+  )
+
+cc.informative <- myProfile$get_api_data(url, fromCSV = FALSE) %>%
+  pluck("timeSeriesData") %>%
+  mutate(date = as.Date(date))
+
+informative.date <-
+  paste(format(min(cc.informative$date), "%B %d, %Y,"), "to", format(max(cc.informative$date), "%B %d, %Y"))
+
+plot.ccinformative <- ggplot(cc.informative) +
+  geom_line(aes(date, count, color = "CCInformative = 1")) +
+  geom_point(aes(date, count, color = "CCInformative = 1"), size = 1.25) +
+  labs(x = "Date",
+       y = "Percent of Patient Encounters",
+       title = "Chief Complaint Informative") +
+  scale_x_date(date_labels = "%b %d", expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    labels = scales::label_percent(accuracy = 1,
+                                   scale = 1)
+  ) +
+  scale_color_manual(values = c("CCInformative = 1" = "Blue")) +
+  expand_limits(y = 0) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/timeSeries?endDate=",
+    endDate,
+    fac,
+    "&percentParam=ddInformative&datasource=va_hosp&startDate=",
+    startDate,
+    "&medicalGroupingSystem=essencesyndromes&userId=2765&aqtTarget=TimeSeries&geographySystem=hospital&detector=probrepswitch&ddInformative=1&timeResolution=daily&hasBeen",
+    patient_class,
+    "=1"
+  )
+
+dd.informative <- myProfile$get_api_data(url, fromCSV = FALSE) %>%
+  pluck("timeSeriesData") %>%
+  mutate(date = as.Date(date))
+
+plot.ddinformative <- ggplot(dd.informative) +
+  geom_line(aes(date, count, color = "DDInformative = 1")) +
+  geom_point(aes(date, count, color = "DDInformative = 1"), size = 1.25) +
+  labs(x = "Date",
+       y = "Percent of Patient Encounters",
+       title = "Discharge Diagnosis (Code) Informative") +
+  scale_x_date(date_labels = "%b %d",
+               expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    labels = scales::label_percent(accuracy = 1,
+                                   scale = 1)
+  ) +
+  scale_color_manual(values = c("DDInformative = 1" = "Blue")) +
+  expand_limits(y = 0) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+plot.ccinformative + plot.ddinformative +
+  plot_annotation(
+    title = paste0(
+      "ESSENCE API-Derived Chief Complaint and Diagnosis Code Validity (",
+      pat.class,
+      " Only)"
+    ),
+    subtitle = paste0(informative.date),
+    theme = theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(face = "bold", size = 12, hjust = 0.5)
+    )
+  )
+```
+
+## ESSENCE API-Derived Message Field Validity, Available Message Fields
+
+The following table displays validity percentage by message field for each `r paste(params$site)` `r paste(pat.class)` facility from `r start_date_lab` through `r end_date_lab`. Fields presented consist of the current fields available for validity assessment using the ESSENCE application programming interface. 
+
+```{r exceptions_tab, echo=FALSE,warning=FALSE,message=FALSE,fig.align='center'}
+# Create Facility List
+values <-
+  paste0(paste0("&geography_hospital_Values=", CBIDs),
+         sep = "",
+         collapse = "")
+
+url <-
+  paste0(
+    "https://essence.syndromicsurveillance.org/nssp_essence/api/dataQuality?datasource=va_hosp&qualityFactor=paramPercentMapped&timeResolution=weekly&startDate=",
+    startDate,
+    "&endDate=",
+    endDate,
+    "&group=geography_hospital",
+    values,
+    "&geography_hospital_Parameters=all"
+  )
+
+api_data <- myProfile$get_api_data(url) %>%
+  pluck("data") %>%
+  mutate(across(everything(), as.character))
+
+validity <- api_data %>%
+  dplyr::select(-Group) %>%
+  pivot_longer(
+    cols = c(-Value, -Parameter),
+    names_to = "week",
+    values_to = "percent_valid"
+  ) %>%
+  mutate(
+    Value = gsub("^.{0,3}", "", Value),
+    Value = str_trim(Value, side = "both"),
+    week = gsub("-", " W", week),
+    week = yearweek(week, week_start = 7),
+    percent_valid = round(as.numeric(percent_valid), 3),
+    percent_valid = tidyr::replace_na(percent_valid, 0)
+  ) %>%
+  dplyr::rename(Facility = Value,
+                Field = Parameter,
+                Week = week)
+
+validity_wide <- validity %>%
+  pivot_wider(
+    id_cols = c(Facility, Week),
+    names_from = Field,
+    values_from = percent_valid
+  )
+
+validity_wide %>%
+  mutate(
+    Sex = cell_spec(Sex, color = ifelse(Sex > 80, "green", "red")),
+    Age = cell_spec(Age, color = ifelse(Age > 80, "green", "red")),
+    Zipcode = cell_spec(Zipcode, color = ifelse(Zipcode > 80, "green", "red")),
+    `Discharge Disposition` = cell_spec(
+      `Discharge Disposition`,
+      color = ifelse(`Discharge Disposition` > 80, "green", "red")
+    ),
+    Race = cell_spec(Race, color = ifelse(Race > 80, "green", "red")),
+    `Calculated Patient Class` = cell_spec(
+      `Calculated Patient Class`,
+      color = ifelse(`Calculated Patient Class` > 80, "green", "red")
+    ),
+    Ethnicity = cell_spec(Ethnicity, color = ifelse(Ethnicity > 80, "green", "red")),
+    `Facility Type Code` = cell_spec(
+      `Facility Type Code`,
+      color = ifelse(`Facility Type Code` > 80, "green", "red")
+    ),
+    `Patient Class` = cell_spec(`Patient Class`, color = ifelse(`Patient Class` > 80, "green", "red"))
+  ) %>%
+  kbl(escape = F) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    fixed_thead = T,
+    full_width = T
+  ) %>%
+  row_spec(0,
+           color = "white",
+           background = "#0033A0",
+           align = "c") %>%
+  scroll_box(width = "100%", height = "600px") 
+```
+
+## Exception Messages by Error Type, `r start_date_lab` through `r end_date_lab`
+
+The following graph displays counts of messages by message arrival date (Arrived_Date) that contained a message error causing them to be sent to the `r paste(params$site)` production exceptions table from `r start_date_lab` through `r end_date_lab`.
+
+```{r exceptions_plot, fig.align='center', echo=FALSE, message=FALSE, warning=FALSE}
+
+con <-
+  RODBC::odbcConnect(
+    "BioSense_Platform",
+    paste0("BIOSENSE\\", params$username),
+    paste0(params$password)
+  )
+
+query <-
+  paste0(
+    "SELECT distinct(d.Facility_Name), count(*) as count, cast(a.Arrived_Date as date) as Arrived_Date, c.Exceptions_Reason as Reason_Text from ",
+    params$site,
+    "_PR_Except a with (nolock) join ",
+    params$site,
+    "_PR_Except_Reason b ON a.Message_ID=b.Message_ID JOIN BioSense_Platform.dbo.Except_Reasons c ON b.Exceptions_Reason_Code=c.Exceptions_Reason_Code right outer join ",
+    params$site,
+    "_MFT d with (nolock) on a.C_Biosense_Facility_ID=d.C_Biosense_Facility_ID WHERE cast(a.Arrived_Date as date) >='",
+    x,
+    "'",
+    " and cast(Arrived_Date as date) <='",
+    y,
+    "' group by c.Exceptions_Reason, d.Facility_Name, cast(a.Arrived_Date as date)"
+  )
+
+# Run query
+table_messages <- RODBC::sqlQuery(con, query)
+
+odbcClose(con)
+
+# Wrangle
+table_messages <- table_messages %>%
+  mutate(
+    Arrived_Date = as.Date(Arrived_Date),
+    Facility_Name = str_trim(Facility_Name, side = "both")
+  ) %>%
+  filter(
+    !grepl(pattern = "Sandy|Cardiology|Specialty|Clinic|Cardio|Lab|Hematology|Dermatology|Eye|Ophthalmology|Endocrinology|Gastroenterology|Pediatric|Sahetya|Associates|HHA|UofL|ULP|Consulting|OB/GYN|Family|Heart|Eickholz|Community Health Center|Primary Care Center|Urgent Care|URGENT CARE|MD|PEDS|Peds|Pain", Facility_Name, ignore.case = FALSE)
+  )
+
+exceptions_overall <- table_messages %>%
+  group_by(Reason_Text, Arrived_Date) %>%
+  dplyr::summarize(count = sum(count)) %>%
+  ungroup()
+
+ad <- list(
+  title = "Number of Messages",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = TRUE
+)
+
+plotly::plot_ly(
+  exceptions_overall,
+  x = ~ Arrived_Date,
+  y = ~ count,
+  name = ~ Reason_Text,
+  type = "scatter",
+  mode = 'lines+markers',
+  autosize = F,
+  width = 950,
+  height = 650
+) %>%
+  plotly::layout(
+    title = "Exception Messages Received by Arrived_Date",
+    yaxis = ad,
+    xaxis = list(title = 'Date'),
+    legend = list(x = 0, y = -.5)
+  )
+```         
+
+## `r paste(params$site)` Production Exception Messages by Error Type, `r start_date_lab` through `r end_date_lab` (Table)
+
+The following table displays `r paste(pat.class)` facility entries from the `r paste(params$site)` production exceptions table received between `r start_date_lab` through `r end_date_lab`. The table includes:
+
+-   Facility Name
+-   message error type
+-   and the number of error messages
+
+```{r exceptions_tbl, echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}
+table_view <- table_messages %>%
+  dplyr::select(Facility_Name, count, Reason_Text) %>%
+  group_by(Reason_Text, `Facility_Name`) %>%
+  dplyr::summarise(count = sum(count))
+
+table_view <- table_view %>%
+  rename(
+    `Message Error Type` = Reason_Text,
+    `Facility Name` = Facility_Name,
+    `Message Count` = count
+  )
+
+datatable(
+  table_view,
+  filter = 'top',
+  extensions = 'Buttons',
+  options = list(
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    pageLength = 15,
+    autoWidth = TRUE,
+    scrollY = T,
+    order = list(2, 'desc')
+  ),
+  rownames = FALSE
+)
+```
+
+*The template for this report was originally created by [Andrew Farrey](https://github.com/andrew-farrey) at the Kentucky Injury Prevention and Research Center. The data quality metrics presented have not been validated by NSSP, however NSSP has confirmed the message fields utilized. Development of this template was supported by Cooperative Agreement Number NU17CE924971, funded by the Centers for Disease Control and Prevention. Its contents are solely the responsibility of the author and do not necessarily represent the official views of the Centers for Disease Control and Prevention, the National Syndromic Surveillance Program, or the U.S. Department of Health and Human Services.*
