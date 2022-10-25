@@ -1197,7 +1197,7 @@ ggplot(element2.plot,
     y = "Percent Complete",
     title = paste(
       params$site,
-      " - NSSP Priority 1 Data Elements Percent Completeness\n(",
+      " - NSSP Priority 2 Data Elements Percent Completeness\n(",
       pat.class,
       "Only)"
     )
