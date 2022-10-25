@@ -35,7 +35,7 @@ myProfile <- readRDS("myProfile.rds")
  
 # The first method uses the odbc library and is the suggested connection method in all NSSP
 # documentation. This method requires you to be online to run the code. As far as I know, this connection method cannot be scheduled to run  
-# (though it may be possible after editing the connection parameters. I've not tested this). I use this method when I'm physically using the 
+# (though it may be possible after editing the connection parameters. I've not tested this. CORRECTION: I HAVE TESTED THIS). I use this method when I'm physically using the 
 # NSSP RStudio Workbench to investigate data quality issues and the like.
 
 con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform")
@@ -48,7 +48,12 @@ con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform")
 
 con <- RODBC::odbcConnect("BioSense_Platform", "BIOSENSE\\username", "password")
 
-# RODBC data pulls are noticeably slower, but the functional advantage is the ability to schedule R scripts or reports.
+# CORRECTION: I tested dbConnect() with a username and password. It can be used to run scheduled scripts/reports 
+# with those parameters included.
+
+con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform", user = "BIOSENSE\\username", password = "password")
+
+# RODBC data pulls are noticeably slower, so with that in mind, I'd use DBI/odbc instead of RODBC.
 # The practical difference between the two methods is a different function is required to query BioSense.
 
 # Using odbc requires using the DBI::dbGetQuery() function.
