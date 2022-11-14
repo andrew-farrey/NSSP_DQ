@@ -48,7 +48,7 @@ con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform")
 
 con <- RODBC::odbcConnect("BioSense_Platform", "BIOSENSE\\username", "password")
 
-# CORRECTION: I tested dbConnect() with a username and password. It can be used to run scheduled scripts/reports 
+# I tested dbConnect() with a username and password. It still cannot be used to run scheduled scripts/reports while offline, even with those 
 # with those parameters included.
 
 con <- dbConnect(odbc::odbc(), dsn = "BioSense_Platform", user = "BIOSENSE\\username", password = "password")
