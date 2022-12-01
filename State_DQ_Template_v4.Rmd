@@ -2189,6 +2189,9 @@ p1_facility %>%
                                       align = "c"),
     Patient_Zip = cell_spec(Patient_Zip, 
                             color = ifelse(Patient_Zip >= 80, "green","red"),
+                            align = "c"),
+    Visit_ID = cell_spec(Visit_ID, 
+                            color = ifelse(Visit_ID >= 80, "green","red"),
                             align = "c")) %>% 
   kbl(escape = F,
       caption = cap) %>% 
