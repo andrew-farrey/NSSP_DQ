@@ -1,3 +1,6 @@
+if (!require("pacman"))
+  install.packages("pacman")
+
 pacman::p_load(Rnssp, tidyverse, lubridate, httr, janitor, kableExtra, grid, gridExtra, 
                jsonlite, RODBC, DBI, odbc, data.table, patchwork, slider, cowplot, flextable, sjmisc)
 
