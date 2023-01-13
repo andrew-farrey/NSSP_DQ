@@ -1,3 +1,6 @@
+# NSSP RStudio Workbench Detecting Duplicate Patients Example
+# NSSP DQSC Meeting 1/13
+
 if (!require("pacman"))
   install.packages("pacman")
 
