@@ -1,4 +1,8 @@
 # De-Duplicating by Visit ID using the ESSENCE API
+# NSSP DQSC Meeting 1/13
+
+if (!require("pacman"))
+  install.packages("pacman")
 
 pacman::p_load(tidyverse, lubridate, data.table, kableExtra, Rnssp)
 
@@ -11,7 +15,7 @@ myProfile <- Credentials$new(askme("Enter my username: "), askme())
 # add facilities to limit to, if desired
 fac <- ""
 
-# Site geography of your site, to limit to state residents
+# Replace with site name of your site to limit to state residents
 site <- "ky"
 
 # CCDD definition to search for
