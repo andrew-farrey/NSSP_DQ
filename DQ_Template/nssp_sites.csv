@@ -1,0 +1,71 @@
+site_id,site_name,site_short_name
+858,Alabama,AL
+857,Alaska,AK
+860,Arizona,AZ
+859,Arkansas,AR
+861,California,CA
+879,Colorado-North Central Region (CO_NCR),CO_NCR
+880,Connecticut,CT
+882,Delaware,DE
+881,District of Columbia,DC
+862,"El Dorado County, CA",CA_El_Dorado
+884,Florida,FL
+885,Georgia,GA
+979,Guam,GU
+886,Hawaii,HI
+889,Idaho,ID
+890,Illinois,IL
+892,Indiana,IN
+887,Iowa,IA
+894,Kansas,KS
+895,Kentucky,KY
+888,"Linn County, IA",IA_Linn_Co
+896,Louisiana,LA
+902,Maine,ME
+893,"Marion County, IN",IN_Marion
+901,Maryland,MD
+899,Massachusetts,MA
+903,Michigan,MI
+904,Minnesota,MN
+905,Mississippi,MS
+906,Missouri,MO
+907,Montana,MT
+863,"Monterey County, CA",CA_Monterey
+910,Nebraska,NE
+914,Nevada,NV
+865,"Nevada County, CA",CA_Nevada
+911,New Hampshire,NH
+912,New Jersey,NJ
+913,New Mexico,NM
+916,New York,NY_State
+915,New York City,NY_City
+908,North Carolina,NC
+909,North Dakota,ND
+917,Ohio,OH
+918,Oklahoma,OK
+919,Oregon,OR
+920,Pennsylvania,PA
+977,"Plumas County, CA",CA_Plumas
+922,Rhode Island,RI
+866,"Riverside County, CA",CA_Riverside
+867,"Sacramento County, CA",CA_Sacramento
+868,"San Diego County, CA",CA_San_Diego
+869,"San Mateo County, CA",CA_San_Mateo
+871,"Santa_Cruz County, CA",CA_Santa_Cruz
+872,"Solano County, CA",CA_Solano
+923,South Carolina,SC
+924,South Dakota,SD
+873,"Stanislaus County, CA",CA_Stanislaus
+925,Tennessee,TN
+926,Texas,TX
+929,"Texas Region 2/3, TX",TX_Region23
+928,TX_Region65,TX_Region65
+930,Utah,UT
+933,Vermont,VT
+931,Virginia,VA
+934,Washington,WA
+937,West Virginia,WV
+936,Wisconsin,WI
+938,Wyoming,WY
+955,"Yolo, CA",CA_Yolo
+978,"Yosemite Gateway Region, CA",CA_YoGACT
