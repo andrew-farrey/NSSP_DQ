@@ -32,8 +32,7 @@ ED <- dbGetQuery(con, paste0("SELECT Feed_Name, C_Biosense_Facility_ID, C_Biosen
                              Administrative_Sex, Age_Reported, Age_Units_Reported, C_Patient_Age_Units, C_Patient_County, 
                              Ethnicity_Code, Ethnicity_Description, Patient_City, Patient_Country, Patient_State, Race_Code, 
                              Race_Description, Version_ID FROM ",params$site,"_PR_Processed WITH (nolock) WHERE C_Patient_Class='E' 
-                             and C_Unique_Patient_ID_Source!='First Patient ID' and 
-                             cast(C_Visit_Date as date) >='",x,"'"," and cast(C_Visit_Date as date) <='",y,"'"))
+                             and cast(C_Visit_Date as date) >='",x,"'"," and cast(C_Visit_Date as date) <='",y,"'"))
 
 # Join to your facility names
 
