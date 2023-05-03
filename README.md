@@ -8,6 +8,6 @@ File #5 can be run on any instance of R/RStudio with internet access, as that fi
 
 The state data quality report template also needs to be run on the NSSP RStudio Workbench as it accesses the BioSense SQL server. 
 
-5/3/23 - Identifying duplicated patient encounter walkthrough added (referenced in combined NSSP Syndrome Definition Subcommittee/DQ Subcommittee call)
+5/3/23 - Identifying duplicated patient encounter walkthrough added ("De-duplication Walkthrough.Rmd") (referenced in combined NSSP Syndrome Definition Subcommittee/DQ Subcommittee call)
 
 Feel free to email me with questions: firstname.lastname@uky.edu.
