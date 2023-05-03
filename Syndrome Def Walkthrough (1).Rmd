@@ -1,0 +1,209 @@
+---
+title: "Untitled"
+author: "Andrew Farrey"
+date: "7/27/2022"
+output: html_document
+---
+
+```{=html}
+<style type="text/css">
+  .main-container {
+    max-width: 1500px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+</style>
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	fig.align = "center",
+	dplyr.summarise.inform = FALSE,
+	echo = FALSE,
+	knitr.figure = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	error = FALSE
+	)
+
+options(scipen = 999)
+
+pacman::p_load(tidyverse, tidycensus, sjmisc, grid, gridExtra, kableExtra, cowplot, viridisLite, patchwork, Rnssp)
+```
+
+```{r set_end_start_dates, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+endDate <- format(Sys.Date() - 4, "%d%b%Y")
+startDate <- format(Sys.Date() - 64, "%d%b%Y")
+```
+
+```{r set facilities or counties, eval=FALSE, include=FALSE}
+fac <- ""
+counties <- ""
+```
+
+```{r set_nssp_user_profile, echo=FALSE, message=FALSE, include=FALSE}
+## Set NSSP user profile
+myProfile <- readRDS("myProfile.rds")
+```
+
+Patient encounters can be duplicated due to BioSense's message processing methodology (encounter can be duplicated based on patient's arrival time, especially if C_Visit_Date_Time is updated in subsequent update messages (e.g., patient arrives at 10PM, update message is sent at 2 AM the following day)), or it can be caused by facility-side data quality issues (e.g., facility changing a patient's assigned medical record number (MRN) mid-visit, so initial message comes in with one MRN value, and a different MRN value is assigned mid-encounter and is sent with all subsequent message updates to that encounter OR C_Visit_Date_Time is updated in subsequent message updates).
+
+The proportion of duplicated encounters is influenced by the average time of arrival for that syndrome definition. In the example below (using **CDC Air Quality-Related Respiratory Illness v1**, patient encounters tend to occur closer to normal business hours, which reduces the likelihood and influence of duplicated patient encounters created due to BioSense's processing rules.
+
+For syndrome definitions (either CC/DD category definitions or custom definitions) designed to identify encounters that are influenced by behavioral habits (e.g., drug overdoses are influenced by the behavioral habits of drug users), the likelihood and thus, the impact of duplicated patient encounters can be increased due to the average patient arrival time/treatment time. 
+
+For example, drug overdoses may be more likely to occur later in the day, which can cause a greater proportion of update messages to be sent on the next calendar day, thus increasing the likelihood of additional duplicated patient encounters. The same point holds for syndrome definitions where patient transfers may be more likely to occur (e.g., likelihood of surgery requiring transfer to a higher level trauma center is higher), which can also give the appearance of a greater community burden than there is in reality.
+
+Reviewing your data at the line level is really the only way to identify these issues. Patient demographic fields, reported chief complaints, assigned discharge diagnosis codes, Visit_ID, Medical_Record_Number, and C_Visit_Date_Time can all assist with identifying duplicated encounters.
+
+This practice may not be necessary for all sites, and site-specific data quality metrics and/or data submission procedures may also affect the burden of duplicated encounters. 
+
+It is critical to check for/control for duplicated encounters if you intend to utilize a syndrome for anomaly detection and you have counties that exhibit low mean daily visit counts for the syndrome in question. 
+
+```{r datadetails pull}
+category_list <- "air%20quality-related%20respiratory%20illness%20v1"
+
+url <- paste0("https://essence.syndromicsurveillance.org/nssp_essence/api/dataDetails?datasource=va_hosp&startDate=",startDate, "&medicalGroupingSystem=essencesyndromes&userId=2765&endDate=",endDate,"&percentParam=noPercent&site=895&hospFacilityType=emergency%20care&aqtTarget=DataDetails&ccddCategory=",category_list,"&geographySystem=hospital&detector=probrepswitch&timeResolution=daily&hasBeenE=1")
+
+api_data <- myProfile$get_api_data(url) %>%
+  pluck("dataDetails")
+
+# De-duplicate by Visit_ID
+# Can use HospitalName (facility name) or Hospital (C_Biosense_Facility_ID)
+air_quality_deduped <- api_data %>% 
+  group_by(Hospital, Visit_ID) %>% 
+  filter(row_number() == 1) %>% 
+  ungroup()
+
+# Examine Duplicates by Hospital Received
+air_quality_dupes <- api_data %>% 
+  select(Date, Time, C_Visit_Date_Time, HospitalName, ZipCode, Region, Sex, C_Patient_Age, Ethnicity = c_ethnicity, Race = c_race, Medical_Record_Number, Visit_ID, CCDDParsed) %>% 
+  group_by(HospitalName, Visit_ID) %>% 
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 1)
+
+# Examine duplicates at line level
+air_quality_dupes_linelevel <- api_data %>% 
+  dplyr::select(Date, Time, C_Visit_Date_Time, HospitalName, ZipCode, Region, Sex, C_Patient_Age, Ethnicity = c_ethnicity, Race = c_race, Medical_Record_Number, Visit_ID, CCDDParsed) %>% 
+  group_by(HospitalName, Visit_ID) %>% 
+  filter(row_number() > 1) %>% 
+  ungroup() %>% 
+  group_by(Visit_ID) %>% 
+  arrange()
+
+# Duplicates can be created either by BioSense's processing rules (when multiple rows per Visit_ID exist, but Medical_Record_Number field remains the same across both "encounters")
+air_quality_dupes_noMRNchange <- api_data %>% 
+  dplyr::select(Date, Time, C_Visit_Date_Time, HospitalName, ZipCode, Region, Sex, C_Patient_Age, Ethnicity = c_ethnicity, Race = c_race, Medical_Record_Number, Visit_ID, CCDDParsed) %>% 
+  group_by(HospitalName, Visit_ID, Medical_Record_Number) %>%
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 1)
+
+# Pull Visit_IDs with more than one row per ID
+Visit_ID.dupes <- api_data %>% 
+  group_by(HospitalName, Visit_ID) %>% 
+  summarize(n = n()) %>% 
+  filter(n > 1) %>% 
+  ungroup() %>% 
+  select(Visit_ID) %>% 
+  pull()
+
+# Pull duplicated encounters by Visit_ID from vector created by Visit_ID.dupes (duplicated for any reason)
+duplicated_air_quality_visits <- api_data %>% 
+  filter(Visit_ID %in% Visit_ID.dupes) %>% 
+  group_by(Hospital, Visit_ID) %>% 
+  arrange(Visit_ID) %>% 
+  ungroup()
+
+kbl(duplicated_air_quality_visits) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+## Plots from Example Data
+
+The difference in smoothed trends isn't particularly apparent at the state level, but is readily apparent at the county level (not shown).
+
+```{r plots, fig.width=12, fig.height=5}
+
+airquality.withdupes <- api_data %>% 
+  mutate(Date = mdy(Date)) %>% 
+  group_by(Date) %>% 
+  summarize(n = n()) %>% 
+  ungroup()
+
+dupe.total <- api_data %>% 
+  count()
+
+p1 <- ggplot(airquality.withdupes) +
+  geom_line(aes(Date, n, color = "CDC Air Quality-Related v1 Encounters")) +
+  geom_smooth(
+    aes(Date, n, color = "Smoothed Trend"),
+    se = FALSE,
+    method = 'loess'
+  ) +
+  labs(x = "Date",
+       y = "Patient Encounters (n)",
+       title = "CDC Air Quality-Related v1 Encounters (ED Visits Only)\nIncluding Duplicated Encounters",
+       subtitle = paste0("n = ", dupe.total)) +
+  geom_point(aes(Date, n, color = "CDC Air Quality-Related v1 Encounters"),
+             size = 1.25) +
+  scale_x_date(date_labels = "%b %d",
+               expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    limits = c(0, NA)
+  ) +
+  scale_color_manual(values = c("CDC Air Quality-Related v1 Encounters" = "Blue",
+                                "Smoothed Trend" = "red")) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+  
+deduped <- air_quality_deduped %>% 
+  mutate(Date = mdy(Date)) %>% 
+  group_by(Date) %>% 
+  summarize(n = n()) %>% 
+  ungroup()
+
+nodupe.total <- air_quality_deduped %>% 
+  count()
+
+p2 <- ggplot(deduped) +
+  geom_line(aes(Date, n, color = "CDC Air Quality-Related v1 Encounters\n(no duplicated encounters)")) +
+  geom_smooth(
+    aes(Date, n, color = "Smoothed Trend"),
+    se = FALSE,
+    method = 'loess'
+  ) +
+  labs(x = "Date",
+       y = "Patient Encounters (n)",
+       title = "CDC Air Quality-Related v1 Encounters (ED Visits Only)\nDuplicated Encounters Removed",
+       subtitle = paste0("n = ", nodupe.total)) +
+  geom_point(aes(Date, n, color = "CDC Air Quality-Related v1 Encounters\n(no duplicated encounters)"),
+             size = 1.25) +
+  scale_x_date(date_labels = "%b %d",
+               expand = c(0, 0.1)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(8),
+    limits = c(0, NA)
+  ) +
+  scale_color_manual(values = c("CDC Air Quality-Related v1 Encounters\n(no duplicated encounters)" = "Red",
+                                "Smoothed Trend" = "blue")) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  )
+
+p1 + p2
+```
